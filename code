@@ -1,0 +1,163 @@
+// === Global Variables ===
+unsigned int angle = 3000;
+unsigned char HL = 1;
+unsigned int Dcntr = 0;
+unsigned int Mcntr = 0;
+unsigned char moveNow = 1;
+unsigned char stopNow = 0;
+
+unsigned int echoTime = 0;
+unsigned char objectDetected = 0;
+unsigned int adc_value = 0;
+
+// === Pin Assignments ===
+#define TRIG_PIN     0x01 // RB0
+#define ECHO_PIN     0x02 // RB1
+
+#define PUMP_BIT     0x02 // RD1
+#define LED_LOW_BIT  0x04 // RD2
+#define LED_HIGH_BIT 0x08 // RD3
+
+#define PUMP_PORT    PORTD
+#define PUMP_TRIS    TRISD
+
+#define LED_PORT     PORTD
+#define LED_TRIS     TRISD
+
+// === Delay ===
+void delay_us(unsigned int us) {
+    while (us--) {
+        asm {
+            NOP
+            NOP
+        }
+    }
+}
+void delay_ms(unsigned int ms) {
+    while (ms--) delay_us(1000);
+}
+
+// === Trigger Ultrasonic ===
+void trigger_ultrasonic() {
+    TRISB &= ~TRIG_PIN;
+    PORTB &= ~TRIG_PIN;
+    delay_us(2);
+    PORTB |= TRIG_PIN;
+    delay_us(10);
+    PORTB &= ~TRIG_PIN;
+    TRISB |= ECHO_PIN;
+}
+
+// === Manual Echo Time (NO TMR0) ===
+unsigned int get_echo_duration() {
+    unsigned int count = 0;
+
+    while (!(PORTB & ECHO_PIN)) {
+        count++;
+        if (count > 30000) return 0;
+    }
+
+    count = 0;
+    while (PORTB & ECHO_PIN) {
+        count++;
+        if (count > 10000) break;
+    }
+
+    return count;
+}
+
+// === ADC ===
+void init_adc() {
+    ADCON1 = 0x80;     // Right justified, RA0 analog
+    TRISA |= 0x01;
+}
+unsigned int read_adc() {
+    ADCON0 = 0x41;     // Select AN0, turn on
+    delay_us(20);
+    ADCON0 |= 0x04;
+    while (ADCON0 & 0x04);
+    return ((ADRESH << 8) | ADRESL);
+}
+
+// === Servo Interrupt (CCP1) ===
+void interrupt() {
+    if (PIR1 & 0x04) {
+        if (HL) {
+            CCPR1H = angle >> 8;
+            CCPR1L = angle;
+            HL = 0;
+            CCP1CON = 0x09;
+        } else {
+            unsigned int low_time = 40000 - angle;
+            CCPR1H = low_time >> 8;
+            CCPR1L = low_time;
+            HL = 1;
+            CCP1CON = 0x08;
+        }
+        TMR1H = 0;
+        TMR1L = 0;
+        PIR1 &= ~0x04;
+    }
+}
+
+// === Main ===
+void main() {
+    // Setup
+    TRISC &= ~0x04; // RC2 (CCP1) output
+    PUMP_TRIS &= ~(PUMP_BIT | LED_LOW_BIT | LED_HIGH_BIT);
+    PUMP_PORT &= ~(PUMP_BIT | LED_LOW_BIT | LED_HIGH_BIT);
+    TRISB |= ECHO_PIN;
+
+    // Timer1 for Servo
+    T1CON = 0x01;
+    TMR1H = 0; TMR1L = 0;
+    CCP1CON = 0x08;
+    PIE1 |= 0x04;
+    INTCON |= 0xC0;
+
+    angle = 3000;
+    moveNow = 1;
+    HL = 1;
+
+    init_adc();
+
+    while (1) {
+        // === Servo timing logic (software delay-based now) ===
+        Mcntr++;
+        if (moveNow && Mcntr >= 2000) { // ~2000 x 5ms = 10s
+            angle = 3300;
+            delay_ms(200);  // move ~60°
+            angle = 3000;
+            Mcntr = 0;
+        }
+
+        // === Ultrasonic Logic ===
+        trigger_ultrasonic();
+        echoTime = get_echo_duration();
+        if (echoTime > 0 && echoTime < 800) {  // Adjust based on test
+            objectDetected = 1;
+        } else {
+            objectDetected = 0;
+        }
+
+        if (objectDetected) {
+            PUMP_PORT |= PUMP_BIT;
+        } else {
+            PUMP_PORT &= ~PUMP_BIT;
+        }
+
+        // === Water Level ===
+        adc_value = read_adc();
+
+        if (adc_value < 300) {
+          PUMP_PORT |= LED_LOW_BIT;     // RD2 ON
+          PUMP_PORT &= ~LED_HIGH_BIT;   // RD3 OFF
+          }       else {
+          PUMP_PORT |= LED_HIGH_BIT;    // RD3 ON
+          PUMP_PORT &= ~LED_LOW_BIT;    // RD2 OFF
+          }
+
+        }
+
+        delay_ms(5); // stable 5ms cycle
+    }
